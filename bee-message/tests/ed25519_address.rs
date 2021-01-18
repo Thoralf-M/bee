@@ -3,7 +3,7 @@
 
 use bee_message::prelude::*;
 
-use core::str::FromStr;
+use core::{convert::TryInto, str::FromStr};
 
 const ED25519_ADDRESS: &str = "52fdfc072182654f163f5f0f9a621d729566c74d10037c4d7bbb0407d1e2c649";
 
@@ -73,4 +73,10 @@ fn from_to_str() {
         ED25519_ADDRESS,
         Ed25519Address::from_str(ED25519_ADDRESS).unwrap().to_string()
     );
+}
+
+#[test]
+fn try_into() {
+    let addr = Address::Ed25519(Ed25519Address::from_str(ED25519_ADDRESS).unwrap());
+    assert_eq!(addr, addr.to_bech32("atoi").try_into().unwrap());
 }

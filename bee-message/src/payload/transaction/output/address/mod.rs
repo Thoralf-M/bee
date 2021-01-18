@@ -12,7 +12,7 @@ use bech32::FromBase32;
 use bee_common::packable::{Packable, Read, Write};
 
 use alloc::string::String;
-use core::ops::Deref;
+use core::{convert::TryFrom, str::FromStr};
 use serde::{Deserialize, Serialize};
 
 #[non_exhaustive]
@@ -25,6 +25,28 @@ pub enum Address {
 impl From<Ed25519Address> for Address {
     fn from(address: Ed25519Address) -> Self {
         Self::Ed25519(address)
+    }
+}
+
+impl TryFrom<&str> for Address {
+    type Error = Error;
+    fn try_from(address: &str) -> Result<Self, Self::Error> {
+        if let Ok(address) = Ed25519Address::from_str(&address) {
+            Ok(Address::Ed25519(address))
+        } else {
+            Address::try_from_bech32(address)
+        }
+    }
+}
+
+impl TryFrom<String> for Address {
+    type Error = Error;
+    fn try_from(address: String) -> Result<Self, Self::Error> {
+        if let Ok(address) = Ed25519Address::from_str(&address) {
+            Ok(Address::Ed25519(address))
+        } else {
+            Address::try_from_bech32(&address)
+        }
     }
 }
 
@@ -78,35 +100,5 @@ impl Packable for Address {
             ED25519_ADDRESS_TYPE => Self::Ed25519(Ed25519Address::unpack(reader)?),
             _ => return Err(Self::Error::InvalidAddressType),
         })
-    }
-}
-
-/// Bech32 encoded address struct
-#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
-pub struct Bech32Address(pub String);
-
-impl Deref for Bech32Address {
-    type Target = String;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl core::fmt::Display for Bech32Address {
-    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl From<String> for Bech32Address {
-    fn from(address: String) -> Self {
-        Bech32Address(address)
-    }
-}
-
-impl From<&str> for Bech32Address {
-    fn from(address: &str) -> Self {
-        Bech32Address(address.to_string())
     }
 }
