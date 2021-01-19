@@ -16,7 +16,7 @@ use core::{convert::TryFrom, str::FromStr};
 use serde::{Deserialize, Serialize};
 
 #[non_exhaustive]
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize, Ord, PartialOrd)]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize, Ord, PartialOrd, Hash)]
 #[serde(tag = "type", content = "data")]
 pub enum Address {
     Ed25519(Ed25519Address),
@@ -98,7 +98,7 @@ impl Packable for Address {
     fn unpack<R: Read + ?Sized>(reader: &mut R) -> Result<Self, Self::Error> {
         Ok(match u8::unpack(reader)? {
             ED25519_ADDRESS_TYPE => Self::Ed25519(Ed25519Address::unpack(reader)?),
-            _ => return Err(Self::Error::InvalidAddressType),
+            t => return Err(Self::Error::InvalidAddressType(t)),
         })
     }
 }

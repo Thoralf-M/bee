@@ -23,7 +23,7 @@ use async_trait::async_trait;
 use chrono::{offset::TimeZone, Utc};
 use log::info;
 
-use std::{collections::HashMap, convert::From, path::Path};
+use std::path::Path;
 
 pub struct SnapshotWorker {}
 
@@ -130,46 +130,28 @@ async fn import_snapshot<B: StorageBackend>(
         }
     }
 
-    for (index, diff) in snapshot.milestone_diffs() {
+    for diff in snapshot.milestone_diffs() {
+        let index = diff.index();
         // Unwrap is fine because we just inserted the ledger index.
         let ledger_index = Fetch::<(), LedgerIndex>::fetch(storage, &())
             .await
             .map_err(|e| Error::StorageBackend(Box::new(e)))?
             .unwrap();
 
-        let mut spent_outputs = HashMap::with_capacity(diff.consumed().len());
-        let mut created_outputs = HashMap::with_capacity(diff.created().len());
-
-        // TODO harmonise ledger/snapshot diff names and order
-
-        for output in diff.created() {
-            created_outputs.insert(
-                *output.output_id(),
-                bee_ledger::model::Output::new(*output.message_id(), Output::from(output.output().clone())),
-            );
-        }
-
-        for spent in diff.consumed() {
-            spent_outputs.insert(
-                *spent.output().output_id(),
-                bee_ledger::model::Spent::new(*spent.transaction_id(), *index),
-            );
-        }
-
         match index {
-            MilestoneIndex(index) if *index == *ledger_index + 1 => {
+            MilestoneIndex(index) if index == *ledger_index + 1 => {
                 // TODO unwrap until we merge both crates
-                apply_diff(storage, MilestoneIndex(*index), &spent_outputs, &created_outputs)
+                apply_diff(storage, MilestoneIndex(index), diff.consumed(), diff.created())
                     .await
                     .unwrap();
             }
-            MilestoneIndex(index) if *index == *ledger_index => {
+            MilestoneIndex(index) if index == *ledger_index => {
                 // TODO unwrap until we merge both crates
-                rollback_diff(storage, MilestoneIndex(*index), &spent_outputs, &created_outputs)
+                rollback_diff(storage, MilestoneIndex(index), diff.consumed(), diff.created())
                     .await
                     .unwrap();
             }
-            _ => return Err(Error::UnexpectedDiffIndex(*index)),
+            _ => return Err(Error::UnexpectedDiffIndex(index)),
         }
     }
 
@@ -177,20 +159,6 @@ async fn import_snapshot<B: StorageBackend>(
     if !check_ledger_state(storage).await.unwrap() {
         return Err(Error::InvalidLedgerState);
     }
-
-    Insert::<(), SnapshotInfo>::insert(
-        storage,
-        &(),
-        &SnapshotInfo::new(
-            snapshot.header().network_id(),
-            snapshot.header().sep_index(),
-            snapshot.header().sep_index(),
-            snapshot.header().sep_index(),
-            snapshot.header().timestamp(),
-        ),
-    )
-    .await
-    .map_err(|e| Error::StorageBackend(Box::new(e)))?;
 
     Ok(snapshot)
 }
@@ -210,12 +178,26 @@ async fn import_snapshots<B: StorageBackend>(
         download_snapshot_file(config.delta_path(), config.download_urls()).await?;
     }
 
-    let _full_snapshot = import_snapshot(storage, Kind::Full, config.full_path(), network_id).await?;
+    let mut snapshot = import_snapshot(storage, Kind::Full, config.full_path(), network_id).await?;
 
     // Load delta file only if both full and delta files already existed or if they have just been downloaded.
     if (full_exists && delta_exists) || (!full_exists && !delta_exists) {
-        let _delta_snapshot = import_snapshot(storage, Kind::Delta, config.delta_path(), network_id).await?;
+        snapshot = import_snapshot(storage, Kind::Delta, config.delta_path(), network_id).await?;
     }
+
+    Insert::<(), SnapshotInfo>::insert(
+        storage,
+        &(),
+        &SnapshotInfo::new(
+            snapshot.header().network_id(),
+            snapshot.header().sep_index(),
+            snapshot.header().sep_index(),
+            snapshot.header().sep_index(),
+            snapshot.header().timestamp(),
+        ),
+    )
+    .await
+    .map_err(|e| Error::StorageBackend(Box::new(e)))?;
 
     Ok(())
 }
