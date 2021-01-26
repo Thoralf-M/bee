@@ -14,8 +14,7 @@ use bech32::FromBase32;
 use serde::{Deserialize, Serialize};
 
 use alloc::string::String;
-use core::{convert::TryFrom, ops::Deref, str::FromStr};
-use serde::{Deserialize, Serialize};
+use core::{convert::TryFrom, str::FromStr};
 
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize, Ord, PartialOrd, Hash)]
