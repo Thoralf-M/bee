@@ -5,19 +5,20 @@ use crate::{
     packet::{Message as MessagePacket, MessageRequest},
     peer::PeerManager,
     storage::StorageBackend,
-    worker::{MetricsWorker, PeerManagerResWorker, TangleWorker},
+    worker::{MetricsWorker, PeerManagerResWorker},
     ProtocolMetrics, Sender,
 };
 
 use bee_common::packable::Packable;
-use bee_network::{NetworkController, PeerId};
+use bee_network::PeerId;
 use bee_runtime::{node::Node, shutdown_stream::ShutdownStream, worker::Worker};
-use bee_tangle::MsTangle;
+use bee_tangle::{MsTangle, TangleWorker};
 
 use async_trait::async_trait;
 use futures::stream::StreamExt;
 use log::info;
 use tokio::sync::mpsc;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use std::{any::TypeId, convert::Infallible};
 
@@ -51,19 +52,17 @@ where
         let (tx, rx) = mpsc::unbounded_channel();
 
         let tangle = node.resource::<MsTangle<N::Backend>>();
-        let network = node.resource::<NetworkController>();
         let metrics = node.resource::<ProtocolMetrics>();
         let peer_manager = node.resource::<PeerManager>();
 
         node.spawn::<Self, _, _>(|shutdown| async move {
             info!("Running.");
 
-            let mut receiver = ShutdownStream::new(shutdown, rx);
+            let mut receiver = ShutdownStream::new(shutdown, UnboundedReceiverStream::new(rx));
 
             while let Some(MessageResponderWorkerEvent { peer_id, request }) = receiver.next().await {
                 if let Some(message) = tangle.get(&request.message_id.into()).await.map(|m| (*m).clone()) {
                     Sender::<MessagePacket>::send(
-                        &network,
                         &peer_manager,
                         &metrics,
                         &peer_id,

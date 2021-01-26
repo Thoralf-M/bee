@@ -13,7 +13,6 @@ mod requester;
 mod responder;
 mod solidifier;
 mod status;
-mod tangle;
 mod tip_pool_cleaner;
 
 pub(crate) use broadcaster::{BroadcasterWorker, BroadcasterWorkerEvent};
@@ -26,7 +25,8 @@ pub use message::{MessageSubmitterError, MessageSubmitterWorker, MessageSubmitte
 pub use metrics::MetricsWorker;
 pub(crate) use milestone_cone_updater::{MilestoneConeUpdaterWorker, MilestoneConeUpdaterWorkerEvent};
 pub(crate) use mps::MpsWorker;
-pub(crate) use peer::{PeerManagerResWorker, PeerManagerWorker, PeerWorker};
+pub use peer::PeerManagerResWorker;
+pub(crate) use peer::{PeerManagerWorker, PeerWorker};
 pub(crate) use propagator::{PropagatorWorker, PropagatorWorkerEvent};
 pub(crate) use requester::{
     MessageRequesterWorker, MessageRequesterWorkerEvent, MilestoneRequesterWorker, MilestoneRequesterWorkerEvent,
@@ -37,5 +37,4 @@ pub(crate) use responder::{
 };
 pub(crate) use solidifier::{MilestoneSolidifierWorker, MilestoneSolidifierWorkerEvent};
 pub(crate) use status::StatusWorker;
-pub use tangle::TangleWorker;
 pub(crate) use tip_pool_cleaner::TipPoolCleanerWorker;

@@ -4,7 +4,7 @@
 use crate::{
     helper,
     packet::{tlv_from_bytes, Header, Heartbeat, Message, MessageRequest, MilestoneRequest, Packet, TlvError},
-    peer::{Peer, PeerManager},
+    peer::Peer,
     storage::StorageBackend,
     worker::{
         peer::packet_handler::PacketHandler, HasherWorkerEvent, MessageResponderWorkerEvent,
@@ -20,6 +20,7 @@ use bee_tangle::MsTangle;
 use futures::{channel::oneshot, future::FutureExt};
 use log::{error, info, trace, warn};
 use tokio::sync::mpsc;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use std::sync::Arc;
 
@@ -27,7 +28,6 @@ use std::sync::Arc;
 pub(crate) enum Error {
     UnsupportedPacketType(u8),
     TlvError(TlvError),
-    FailedSend,
 }
 
 impl From<TlvError> for Error {
@@ -39,7 +39,6 @@ impl From<TlvError> for Error {
 pub struct PeerWorker {
     peer: Arc<Peer>,
     metrics: ResourceHandle<ProtocolMetrics>,
-    peer_manager: ResourceHandle<PeerManager>,
     hasher: mpsc::UnboundedSender<HasherWorkerEvent>,
     message_responder: mpsc::UnboundedSender<MessageResponderWorkerEvent>,
     milestone_responder: mpsc::UnboundedSender<MilestoneResponderWorkerEvent>,
@@ -50,7 +49,6 @@ impl PeerWorker {
     pub(crate) fn new(
         peer: Arc<Peer>,
         metrics: ResourceHandle<ProtocolMetrics>,
-        peer_manager: ResourceHandle<PeerManager>,
         hasher: mpsc::UnboundedSender<HasherWorkerEvent>,
         message_responder: mpsc::UnboundedSender<MessageResponderWorkerEvent>,
         milestone_responder: mpsc::UnboundedSender<MilestoneResponderWorkerEvent>,
@@ -59,7 +57,6 @@ impl PeerWorker {
         Self {
             peer,
             metrics,
-            peer_manager,
             hasher,
             message_responder,
             milestone_responder,
@@ -71,7 +68,7 @@ impl PeerWorker {
         mut self,
         tangle: ResourceHandle<MsTangle<B>>,
         requested_milestones: ResourceHandle<RequestedMilestones>,
-        receiver: mpsc::UnboundedReceiver<Vec<u8>>,
+        receiver: UnboundedReceiverStream<Vec<u8>>,
         shutdown: oneshot::Receiver<()>,
     ) {
         info!("[{}] Running.", self.peer.address());
@@ -111,8 +108,6 @@ impl PeerWorker {
         }
 
         info!("[{}] Stopped.", self.peer.address());
-
-        self.peer_manager.remove(&self.peer.id()).await;
     }
 
     fn process_packet<B: StorageBackend>(
@@ -127,12 +122,10 @@ impl PeerWorker {
 
                 let packet = tlv_from_bytes::<MilestoneRequest>(&header, bytes)?;
 
-                self.milestone_responder
-                    .send(MilestoneResponderWorkerEvent {
-                        peer_id: self.peer.id().clone(),
-                        request: packet,
-                    })
-                    .map_err(|_| Error::FailedSend)?;
+                let _ = self.milestone_responder.send(MilestoneResponderWorkerEvent {
+                    peer_id: self.peer.id().clone(),
+                    request: packet,
+                });
 
                 self.peer.metrics().milestone_requests_received_inc();
                 self.metrics.milestone_requests_received_inc();
@@ -142,13 +135,11 @@ impl PeerWorker {
 
                 let packet = tlv_from_bytes::<Message>(&header, bytes)?;
 
-                self.hasher
-                    .send(HasherWorkerEvent {
-                        from: Some(self.peer.id().clone()),
-                        message_packet: packet,
-                        notifier: None,
-                    })
-                    .map_err(|_| Error::FailedSend)?;
+                let _ = self.hasher.send(HasherWorkerEvent {
+                    from: Some(self.peer.id().clone()),
+                    message_packet: packet,
+                    notifier: None,
+                });
 
                 self.peer.metrics().messages_received_inc();
                 self.metrics.messages_received_inc();
@@ -158,12 +149,10 @@ impl PeerWorker {
 
                 let packet = tlv_from_bytes::<MessageRequest>(&header, bytes)?;
 
-                self.message_responder
-                    .send(MessageResponderWorkerEvent {
-                        peer_id: self.peer.id().clone(),
-                        request: packet,
-                    })
-                    .map_err(|_| Error::FailedSend)?;
+                let _ = self.message_responder.send(MessageResponderWorkerEvent {
+                    peer_id: self.peer.id().clone(),
+                    request: packet,
+                });
 
                 self.peer.metrics().message_requests_received_inc();
                 self.metrics.message_requests_received_inc();

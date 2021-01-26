@@ -1,15 +1,16 @@
 // Copyright 2020 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{storage::StorageBackend, worker::TangleWorker};
+use crate::storage::StorageBackend;
 
 use bee_runtime::{node::Node, shutdown_stream::ShutdownStream, worker::Worker};
-use bee_tangle::MsTangle;
+use bee_tangle::{MsTangle, TangleWorker};
 
 use async_trait::async_trait;
 use futures::StreamExt;
 use log::info;
 use tokio::time::interval;
+use tokio_stream::wrappers::IntervalStream;
 
 use std::{any::TypeId, convert::Infallible, time::Duration};
 
@@ -36,8 +37,10 @@ where
         node.spawn::<Self, _, _>(|shutdown| async move {
             info!("Running.");
 
-            let mut ticker =
-                ShutdownStream::new(shutdown, interval(Duration::from_secs(TIP_POOL_CLEANER_INTERVAL_SEC)));
+            let mut ticker = ShutdownStream::new(
+                shutdown,
+                IntervalStream::new(interval(Duration::from_secs(TIP_POOL_CLEANER_INTERVAL_SEC))),
+            );
 
             while ticker.next().await.is_some() {
                 tangle.reduce_tips().await

@@ -14,8 +14,8 @@ pub use constants::{INPUT_OUTPUT_COUNT_MAX, INPUT_OUTPUT_COUNT_RANGE, INPUT_OUTP
 pub use essence::{TransactionPayloadEssence, TransactionPayloadEssenceBuilder};
 pub use input::{Input, UTXOInput};
 pub use output::{
-    Address, Ed25519Address, Output, OutputId, SignatureLockedDustAllowanceOutput, SignatureLockedSingleOutput,
-    ED25519_ADDRESS_LENGTH, OUTPUT_ID_LENGTH,
+    Address, ConsumedOutput, CreatedOutput, Ed25519Address, Output, OutputId, SignatureLockedDustAllowanceOutput,
+    SignatureLockedSingleOutput, ED25519_ADDRESS_LENGTH, OUTPUT_ID_LENGTH,
 };
 pub use transaction_id::{TransactionId, TRANSACTION_ID_LENGTH};
 pub use unlock::{Ed25519Signature, ReferenceUnlock, SignatureUnlock, UnlockBlock};
@@ -170,9 +170,11 @@ impl TransactionPayloadBuilder {
         let essence = self.essence.ok_or(Error::MissingField("essence"))?;
 
         // Unlock Blocks validation
-        // Unlock Blocks Count must match the amount of inputs. Must be 0 < x < 127.
-        if !INPUT_OUTPUT_COUNT_RANGE.contains(&self.unlock_blocks.len()) {
-            return Err(Error::InvalidInputOutputCount(self.unlock_blocks.len()));
+        if essence.inputs().len() != self.unlock_blocks.len() {
+            return Err(Error::InvalidUnlockBlockCount(
+                essence.inputs().len(),
+                self.unlock_blocks.len(),
+            ));
         }
 
         // for (i, block) in self.unlock_blocks.iter().enumerate() {

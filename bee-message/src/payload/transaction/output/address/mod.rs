@@ -6,17 +6,19 @@ mod ed25519;
 use ed25519::ED25519_ADDRESS_TYPE;
 pub use ed25519::{Ed25519Address, ED25519_ADDRESS_LENGTH};
 
-use crate::Error;
+use crate::{payload::transaction::SignatureUnlock, Error};
 
-use bech32::FromBase32;
 use bee_common::packable::{Packable, Read, Write};
 
+use bech32::FromBase32;
+use serde::{Deserialize, Serialize};
+
 use alloc::string::String;
-use core::{convert::TryFrom, str::FromStr};
+use core::{convert::TryFrom, ops::Deref, str::FromStr};
 use serde::{Deserialize, Serialize};
 
 #[non_exhaustive]
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize, Ord, PartialOrd, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize, Ord, PartialOrd, Hash)]
 #[serde(tag = "type", content = "data")]
 pub enum Address {
     Ed25519(Ed25519Address),
@@ -69,9 +71,19 @@ impl Address {
             Err(_) => Err(Error::InvalidAddress),
         }
     }
+
     pub fn to_bech32(&self, hrp: &str) -> String {
         match self {
             Address::Ed25519(address) => address.to_bech32(hrp),
+        }
+    }
+
+    pub fn verify(&self, msg: &[u8], signature: &SignatureUnlock) -> bool {
+        match self {
+            Address::Ed25519(address) => {
+                let SignatureUnlock::Ed25519(signature) = signature;
+                address.verify(msg, signature)
+            }
         }
     }
 }

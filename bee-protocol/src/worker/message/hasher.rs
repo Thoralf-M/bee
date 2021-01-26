@@ -30,12 +30,14 @@ use blake2::{
 };
 use futures::{
     channel::oneshot::Sender,
-    stream::{Fuse, Stream, StreamExt},
+    stream::{unfold, Fuse},
     task::{Context, Poll},
+    FutureExt, Stream, StreamExt,
 };
 use log::{info, trace, warn};
 use pin_project::pin_project;
 use tokio::sync::mpsc;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use std::{any::TypeId, convert::Infallible, pin::Pin};
 
@@ -52,22 +54,22 @@ pub(crate) struct HasherWorker {
     pub(crate) tx: mpsc::UnboundedSender<HasherWorkerEvent>,
 }
 
-fn trigger_hashing(
-    batch_size: usize,
-    receiver: &mut BatchStream,
-    processor_worker: &mut mpsc::UnboundedSender<ProcessorWorkerEvent>,
-) {
-    if batch_size < BATCH_SIZE_THRESHOLD {
-        send_hashes(receiver.hasher.hash_unbatched(), &mut receiver.events, processor_worker);
-    } else {
-        send_hashes(receiver.hasher.hash_batched(), &mut receiver.events, processor_worker);
-    }
-    // FIXME: we could store the fraction of times we use the batched hasher
-}
+// fn trigger_hashing(
+//     batch_size: usize,
+//     receiver: &mut BatchStream,
+//     processor_worker: &mut mpsc::UnboundedSender<ProcessorWorkerEvent>,
+// ) {
+//     if batch_size < BATCH_SIZE_THRESHOLD {
+//         send_hashes(receiver.hasher.hash_unbatched(), &mut receiver.events, processor_worker);
+//     } else {
+//         send_hashes(receiver.hasher.hash_batched(), &mut receiver.events, processor_worker);
+//     }
+//     // FIXME: we could store the fraction of times we use the batched hasher
+// }
 
 fn send_hashes(
     hashes: impl Iterator<Item = TritBuf>,
-    events: &mut Vec<HasherWorkerEvent>,
+    events: Vec<HasherWorkerEvent>,
     processor_worker: &mut mpsc::UnboundedSender<ProcessorWorkerEvent>,
 ) {
     for (
@@ -77,7 +79,7 @@ fn send_hashes(
             notifier: message_inserted_tx,
         },
         hash,
-    ) in events.drain(..).zip(hashes)
+    ) in events.into_iter().zip(hashes)
     {
         // TODO replace this with scoring function
         let zeros = hash.iter().rev().take_while(|t| *t == Btrit::Zero).count() as u32;
@@ -93,6 +95,12 @@ fn send_hashes(
             warn!("Sending event to the processor worker failed: {}.", e);
         }
     }
+}
+
+pub(crate) struct HashTask {
+    batch_size: usize,
+    hasher: BatchHasher<T5B1Buf>,
+    events: Vec<HasherWorkerEvent>,
 }
 
 #[async_trait]
@@ -114,17 +122,51 @@ where
 
     async fn start(node: &mut N, config: Self::Config) -> Result<Self, Self::Error> {
         let (tx, rx) = mpsc::unbounded_channel();
-        let mut processor_worker = node.worker::<ProcessorWorker>().unwrap().tx.clone();
+        let processor_worker = node.worker::<ProcessorWorker>().unwrap().tx.clone();
         let metrics = node.resource::<ProtocolMetrics>();
         let peer_manager = node.resource::<PeerManager>();
 
+        let hash_tasks = num_cpus::get();
+        let (task_tx, task_rx) = async_channel::unbounded();
+
+        for _ in 0..hash_tasks {
+            let task_rx = task_rx.clone();
+            let mut processor_worker = processor_worker.clone();
+            node.spawn::<Self, _, _>(|shutdown| async move {
+                let mut s = ShutdownStream::new(
+                    shutdown,
+                    unfold((), |()| task_rx.recv().map(|t| Some((t.ok()?, ())))).boxed(),
+                );
+
+                while let Some(HashTask {
+                    batch_size,
+                    mut hasher,
+                    events,
+                }) = s.next().await
+                {
+                    tokio::task::block_in_place(|| {
+                        if batch_size < BATCH_SIZE_THRESHOLD {
+                            send_hashes(hasher.hash_unbatched(), events, &mut processor_worker);
+                        } else {
+                            send_hashes(hasher.hash_batched(), events, &mut processor_worker);
+                        }
+                    });
+                }
+            });
+        }
+
         node.spawn::<Self, _, _>(|shutdown| async move {
-            let mut receiver = BatchStream::new(config, metrics, peer_manager, ShutdownStream::new(shutdown, rx));
+            let mut receiver = BatchStream::new(
+                config,
+                metrics,
+                peer_manager,
+                ShutdownStream::new(shutdown, UnboundedReceiverStream::new(rx)),
+            );
 
             info!("Running.");
 
-            while let Some(batch_size) = receiver.next().await {
-                trigger_hashing(batch_size, &mut receiver, &mut processor_worker);
+            while let Some(task) = receiver.next().await {
+                task_tx.send(task).await.unwrap();
             }
 
             info!("Stopped.");
@@ -139,7 +181,7 @@ pub(crate) struct BatchStream {
     metrics: ResourceHandle<ProtocolMetrics>,
     peer_manager: ResourceHandle<PeerManager>,
     #[pin]
-    receiver: ShutdownStream<Fuse<mpsc::UnboundedReceiver<HasherWorkerEvent>>>,
+    receiver: ShutdownStream<Fuse<UnboundedReceiverStream<HasherWorkerEvent>>>,
     cache: HashCache,
     hasher: BatchHasher<T5B1Buf>,
     events: Vec<HasherWorkerEvent>,
@@ -151,7 +193,7 @@ impl BatchStream {
         cache_size: usize,
         metrics: ResourceHandle<ProtocolMetrics>,
         peer_manager: ResourceHandle<PeerManager>,
-        receiver: ShutdownStream<Fuse<mpsc::UnboundedReceiver<HasherWorkerEvent>>>,
+        receiver: ShutdownStream<Fuse<UnboundedReceiverStream<HasherWorkerEvent>>>,
     ) -> Self {
         assert!(BATCH_SIZE_THRESHOLD <= BATCH_SIZE);
         Self {
@@ -167,7 +209,7 @@ impl BatchStream {
 }
 
 impl Stream for BatchStream {
-    type Item = usize;
+    type Item = HashTask;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         // We need to do this because `receiver` needs to be pinned to be polled.
@@ -187,7 +229,11 @@ impl Stream for BatchStream {
             let batch_size = hasher.len();
             // If we already have `BATCH_SIZE` messages, we are ready.
             if batch_size == BATCH_SIZE {
-                return Poll::Ready(Some(BATCH_SIZE));
+                return Poll::Ready(Some(HashTask {
+                    batch_size: BATCH_SIZE,
+                    hasher: std::mem::replace(hasher, BatchHasher::new(HASH_LENGTH, CurlPRounds::Rounds81)),
+                    events: std::mem::take(events),
+                }));
             }
             // Otherwise we need to check if there are messages inside the `receiver` stream that we could include in
             // the current batch.
@@ -200,7 +246,11 @@ impl Stream for BatchStream {
                     } else {
                         // If the stream is not ready yet, but we have messages in the batch, we can process them
                         // instead of waiting.
-                        Poll::Ready(Some(batch_size))
+                        Poll::Ready(Some(HashTask {
+                            batch_size,
+                            hasher: std::mem::replace(hasher, BatchHasher::new(HASH_LENGTH, CurlPRounds::Rounds81)),
+                            events: std::mem::take(events),
+                        }))
                     };
                 }
                 Poll::Ready(Some(event)) => {
@@ -245,7 +295,11 @@ impl Stream for BatchStream {
 
                     // If after adding the message to the batch its size is `BATCH_SIZE` we are ready to hash.
                     if batch_size == BATCH_SIZE - 1 {
-                        return Poll::Ready(Some(BATCH_SIZE));
+                        return Poll::Ready(Some(HashTask {
+                            batch_size: BATCH_SIZE,
+                            hasher: std::mem::replace(hasher, BatchHasher::new(HASH_LENGTH, CurlPRounds::Rounds81)),
+                            events: std::mem::take(events),
+                        }));
                     }
                 }
                 Poll::Ready(None) => {

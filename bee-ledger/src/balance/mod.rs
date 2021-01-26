@@ -1,24 +1,40 @@
 // Copyright 2020 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
+mod diff;
+
+pub use diff::{BalanceDiff, BalanceDiffs};
+
 use crate::model::Error;
 
 use bee_common::packable::{Packable, Read, Write};
 
 #[derive(Debug)]
 pub struct Balance {
-    balance: u64,
+    amount: u64,
     dust_allowance: u64,
-    output_count: u64,
+    dust_output: u64,
 }
 
 impl Balance {
-    pub fn new(balance: u64, dust_allowance: u64, output_count: u64) -> Self {
+    pub fn new(amount: u64, dust_allowance: u64, dust_output: u64) -> Self {
         Self {
-            balance,
+            amount,
             dust_allowance,
-            output_count,
+            dust_output,
         }
+    }
+
+    pub fn amount(&self) -> u64 {
+        self.amount
+    }
+
+    pub fn dust_allowance(&self) -> u64 {
+        self.dust_allowance
+    }
+
+    pub fn dust_output(&self) -> u64 {
+        self.dust_output
     }
 }
 
@@ -26,13 +42,13 @@ impl Packable for Balance {
     type Error = Error;
 
     fn packed_len(&self) -> usize {
-        self.balance.packed_len() + self.dust_allowance.packed_len() + self.output_count.packed_len()
+        self.amount.packed_len() + self.dust_allowance.packed_len() + self.dust_output.packed_len()
     }
 
     fn pack<W: Write>(&self, writer: &mut W) -> Result<(), Self::Error> {
-        self.balance.pack(writer)?;
+        self.amount.pack(writer)?;
         self.dust_allowance.pack(writer)?;
-        self.output_count.pack(writer)?;
+        self.dust_output.pack(writer)?;
 
         Ok(())
     }

@@ -10,22 +10,20 @@ mod workers;
 use crate::{
     config::NodeConfig,
     plugins::dashboard::{
-        websocket::responses::{
-            confirmed_info, confirmed_milestone_metrics, database_size_metrics, node_status, tip_info,
+        config::DashboardConfig,
+        websocket::{
+            responses::{
+                confirmed_info, milestone, milestone_info, mps_metrics_updated, solid_info, sync_status, tip_info,
+                vertex, WsEvent,
+            },
+            user_connected, WsUsers,
         },
         workers::{
-            confirmed_ms_metrics::{confirmed_ms_metrics_worker, ConfirmedMilestoneMetrics},
-            db_size_metrics::{db_size_metrics_worker, DatabaseSizeMetrics},
-            node_status::{node_status_worker, NodeStatus},
+            confirmed_ms_metrics::confirmed_ms_metrics_worker, db_size_metrics::db_size_metrics_worker,
+            node_status::node_status_worker, peer_metric::peer_metric_worker,
         },
     },
     storage::StorageBackend,
-};
-
-use config::DashboardConfig;
-use websocket::{
-    responses::{milestone, milestone_info, mps_metrics_updated, solid_info, sync_status, vertex, WsEvent},
-    user_connected, WsUsers,
 };
 
 use bee_ledger::event::MilestoneConfirmed;
@@ -34,16 +32,17 @@ use bee_protocol::{
         LatestMilestoneChanged, LatestSolidMilestoneChanged, MessageSolidified, MpsMetricsUpdated, NewVertex, TipAdded,
         TipRemoved,
     },
-    TangleWorker,
+    MetricsWorker, PeerManagerResWorker,
 };
 use bee_runtime::{node::Node, shutdown_stream::ShutdownStream, worker::Worker};
-use bee_tangle::MsTangle;
+use bee_tangle::{MsTangle, TangleWorker};
 
 use asset::Asset;
 use async_trait::async_trait;
 use futures::stream::StreamExt;
 use log::{debug, error, info};
 use tokio::sync::mpsc;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 use warp::{http::header::HeaderValue, path::FullPath, reply::Response, ws::Message, Filter, Rejection, Reply};
 use warp_reverse_proxy::reverse_proxy_filter;
 
@@ -70,7 +69,7 @@ where
     node.spawn::<Dashboard, _, _>(|shutdown| async move {
         debug!("Ws {} topic handler running.", topic);
 
-        let mut receiver = ShutdownStream::new(shutdown, rx);
+        let mut receiver = ShutdownStream::new(shutdown, UnboundedReceiverStream::new(rx));
 
         while let Some(event) = receiver.next().await {
             broadcast(f(event), &users).await;
@@ -96,7 +95,12 @@ where
     type Error = Infallible;
 
     fn dependencies() -> &'static [TypeId] {
-        vec![TypeId::of::<TangleWorker>()].leak()
+        vec![
+            TypeId::of::<TangleWorker>(),
+            TypeId::of::<MetricsWorker>(),
+            TypeId::of::<PeerManagerResWorker>(),
+        ]
+        .leak()
     }
 
     async fn start(node: &mut N, config: Self::Config) -> Result<Self, Self::Error> {
@@ -139,35 +143,18 @@ where
         topic_handler(node, "MilestoneConfirmed", &users, move |event: MilestoneConfirmed| {
             confirmed_info::forward(event)
         });
-        topic_handler(
-            node,
-            "ConfirmedMilestoneMetrics",
-            &users,
-            move |event: ConfirmedMilestoneMetrics| confirmed_milestone_metrics::forward(event),
-        );
-        topic_handler(
-            node,
-            "DatabaseSizeMetrics",
-            &users,
-            move |event: DatabaseSizeMetrics| database_size_metrics::forward(event),
-        );
-
         topic_handler(node, "TipInfo", &users, move |event: TipAdded| {
             tip_info::forward_tip_added(event)
         });
-
         topic_handler(node, "TipInfo", &users, move |event: TipRemoved| {
             tip_info::forward_tip_removed(event)
         });
 
-        topic_handler(node, "NodeStatus", &users, move |event: NodeStatus| {
-            node_status::forward(event)
-        });
-
         // run sub-workers
-        confirmed_ms_metrics_worker(node);
-        db_size_metrics_worker(node);
-        node_status_worker(node);
+        confirmed_ms_metrics_worker(node, &users);
+        db_size_metrics_worker(node, &users);
+        node_status_worker(node, &users);
+        peer_metric_worker(node, &users);
 
         node.spawn::<Self, _, _>(|shutdown| async move {
             info!("Running.");
@@ -193,7 +180,11 @@ where
                     )
                     .map(|res| res),
                 ))
-                .or(warp::path!("explorer" / ..).and_then(serve_index));
+                .or(warp::path!("analytics" / ..).and_then(serve_index))
+                .or(warp::path!("peers" / ..).and_then(serve_index))
+                .or(warp::path!("explorer" / ..).and_then(serve_index))
+                .or(warp::path!("visualizer" / ..).and_then(serve_index))
+                .or(warp::path!("settings" / ..).and_then(serve_index));
 
             info!("Dashboard available at http://localhost:{}.", config.port());
 

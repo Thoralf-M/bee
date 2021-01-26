@@ -3,7 +3,7 @@
 
 use crate::{
     interaction::events::InternalEventSender,
-    peers::{BannedAddrList, BannedPeerList, PeerInfo, PeerList, PeerManager, PeerRelation},
+    peers::{BannedAddrList, BannedPeerList, PeerInfo, PeerList, PeerRelation},
     transport::build_transport,
     Multiaddr, PeerId, ShortId,
 };
@@ -22,7 +22,6 @@ use libp2p::{
 use log::*;
 
 use std::{
-    any::TypeId,
     convert::Infallible,
     io,
     pin::Pin,
@@ -53,7 +52,7 @@ pub struct ConnectionManagerConfig {
 }
 
 impl ConnectionManagerConfig {
-    pub fn new(
+    pub async fn new(
         local_keys: identity::Keypair,
         // TODO: allow multiple bind addresses
         bind_address: Multiaddr,
@@ -69,13 +68,12 @@ impl ConnectionManagerConfig {
             .listen_on(bind_address.clone())
             .map_err(|_| Error::BindingAddressFailed(bind_address))?;
 
-        let listen_address =
-            if let Some(Some(Ok(ListenerEvent::NewAddress(listen_address)))) = peer_listener.next().now_or_never() {
-                trace!("listening address = {}", listen_address);
-                listen_address
-            } else {
-                return Err(Error::NotListeningError);
-            };
+        let listen_address = if let Some(Ok(ListenerEvent::NewAddress(listen_address))) = peer_listener.next().await {
+            trace!("listening address = {}", listen_address);
+            listen_address
+        } else {
+            return Err(Error::NotListeningError);
+        };
 
         trace!("Accepting connections on {}.", listen_address);
 
@@ -96,9 +94,9 @@ impl<N: Node> Worker<N> for ConnectionManager {
     type Config = ConnectionManagerConfig;
     type Error = Infallible;
 
-    fn dependencies() -> &'static [TypeId] {
-        vec![TypeId::of::<PeerManager>()].leak()
-    }
+    // fn dependencies() -> &'static [TypeId] {
+    //     vec![TypeId::of::<PeerManager>()].leak()
+    // }
 
     async fn start(node: &mut N, config: Self::Config) -> Result<Self, Self::Error> {
         let ConnectionManagerConfig {
@@ -171,7 +169,7 @@ impl<N: Node> Worker<N> for ConnectionManager {
                             continue;
                         } else {
                             // We also allow for a certain number of unknown peers.
-                            info!("Unknown peer {} accepted.", peer_info.alias);
+                            info!("Unknown peer '{}' accepted.", peer_info.alias);
 
                             peer_info
                         }
@@ -231,8 +229,6 @@ impl<N: Node> Worker<N> for ConnectionManager {
         Ok(())
     }
 }
-
-#[inline]
 fn log_inbound_connection_success(peer_info: &PeerInfo) {
-    info!("Established (inbound) connection with {}.", peer_info.alias);
+    info!("Established (inbound) connection with '{}'.", peer_info.alias);
 }

@@ -2,10 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    config::RestApiConfig, filters::CustomRejection::BadRequest, handlers, storage::StorageBackend, NetworkId,
+    config::RestApiConfig, filters::CustomRejection::BadRequest, handlers, storage::StorageBackend, Bech32Hrp,
+    NetworkId,
 };
 
-use bee_protocol::{config::ProtocolConfig, MessageSubmitterWorkerEvent};
+use bee_network::{NetworkController, PeerId};
+use bee_protocol::{config::ProtocolConfig, MessageSubmitterWorkerEvent, PeerManager};
 use bee_runtime::resource::ResourceHandle;
 use bee_tangle::MsTangle;
 
@@ -28,12 +30,16 @@ pub fn all<B: StorageBackend>(
     storage: ResourceHandle<B>,
     message_submitter: mpsc::UnboundedSender<MessageSubmitterWorkerEvent>,
     network_id: NetworkId,
+    bech32_hrp: Bech32Hrp,
     rest_api_config: RestApiConfig,
     protocol_config: ProtocolConfig,
+    peer_manager: ResourceHandle<PeerManager>,
+    network_controller: ResourceHandle<NetworkController>,
 ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
     health(tangle.clone()).or(info(
         tangle.clone(),
         network_id.clone(),
+        bech32_hrp,
         rest_api_config.clone(),
         protocol_config.clone(),
     )
@@ -56,7 +62,11 @@ pub fn all<B: StorageBackend>(
     .or(balance_ed25519(storage.clone()))
     .or(outputs_bech32(storage.clone()))
     .or(outputs_ed25519(storage))
-    .or(milestone(tangle)))
+    .or(milestone(tangle))
+    .or(peers(peer_manager.clone()))
+    .or(peer_add(peer_manager.clone(), network_controller.clone()))
+    .or(peer_remove(network_controller))
+    .or(peer(peer_manager)))
 }
 
 fn health<B: StorageBackend>(
@@ -72,6 +82,7 @@ fn health<B: StorageBackend>(
 fn info<B: StorageBackend>(
     tangle: ResourceHandle<MsTangle<B>>,
     network_id: NetworkId,
+    bech32_hrp: Bech32Hrp,
     rest_api_config: RestApiConfig,
     protocol_config: ProtocolConfig,
 ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
@@ -82,6 +93,7 @@ fn info<B: StorageBackend>(
         .and(warp::path::end())
         .and(with_tangle(tangle))
         .and(with_network_id(network_id))
+        .and(with_bech32_hrp(bech32_hrp))
         .and(with_rest_api_config(rest_api_config))
         .and(with_protocol_config(protocol_config))
         .and_then(handlers::info::info)
@@ -289,6 +301,59 @@ fn milestone<B: StorageBackend>(
         .and_then(handlers::milestone::milestone)
 }
 
+fn peers(
+    peer_manager: ResourceHandle<PeerManager>,
+) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+    warp::get()
+        .and(warp::path("api"))
+        .and(warp::path("v1"))
+        .and(warp::path("peers"))
+        .and(warp::path::end())
+        .and(with_peer_manager(peer_manager))
+        .and_then(handlers::peers::peers)
+}
+
+fn peer(
+    peer_manager: ResourceHandle<PeerManager>,
+) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+    warp::get()
+        .and(warp::path("api"))
+        .and(warp::path("v1"))
+        .and(warp::path("peer"))
+        .and(custom_path_param::peer_id())
+        .and(warp::path::end())
+        .and(with_peer_manager(peer_manager))
+        .and_then(handlers::peer::peer)
+}
+
+fn peer_add(
+    peer_manager: ResourceHandle<PeerManager>,
+    network_controller: ResourceHandle<NetworkController>,
+) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+    warp::get()
+        .and(warp::path("api"))
+        .and(warp::path("v1"))
+        .and(warp::path("peer"))
+        .and(warp::path::end())
+        .and(warp::body::json())
+        .and(with_peer_manager(peer_manager))
+        .and(with_network_controller(network_controller))
+        .and_then(handlers::add_peer::add_peer)
+}
+
+fn peer_remove(
+    network_controller: ResourceHandle<NetworkController>,
+) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+    warp::delete()
+        .and(warp::path("api"))
+        .and(warp::path("v1"))
+        .and(warp::path("peer"))
+        .and(custom_path_param::peer_id())
+        .and(warp::path::end())
+        .and(with_network_controller(network_controller))
+        .and_then(handlers::remove_peer::remove_peer)
+}
+
 mod custom_path_param {
 
     use super::*;
@@ -343,12 +408,27 @@ mod custom_path_param {
             }
         })
     }
+
+    pub(super) fn peer_id() -> impl Filter<Extract = (PeerId,), Error = Rejection> + Copy {
+        warp::path::param().and_then(|value: String| async move {
+            match value.parse::<PeerId>() {
+                Ok(id) => Ok(id),
+                Err(_) => Err(reject::custom(BadRequest("invalid peer id".to_string()))),
+            }
+        })
+    }
 }
 
 fn with_network_id(
     network_id: NetworkId,
 ) -> impl Filter<Extract = (NetworkId,), Error = std::convert::Infallible> + Clone {
     warp::any().map(move || network_id.clone())
+}
+
+fn with_bech32_hrp(
+    bech32_hrp: Bech32Hrp,
+) -> impl Filter<Extract = (Bech32Hrp,), Error = std::convert::Infallible> + Clone {
+    warp::any().map(move || bech32_hrp.clone())
 }
 
 fn with_rest_api_config(
@@ -380,4 +460,16 @@ fn with_message_submitter(
 ) -> impl Filter<Extract = (mpsc::UnboundedSender<MessageSubmitterWorkerEvent>,), Error = std::convert::Infallible> + Clone
 {
     warp::any().map(move || message_submitter.clone())
+}
+
+fn with_peer_manager(
+    peer_manager: ResourceHandle<PeerManager>,
+) -> impl Filter<Extract = (ResourceHandle<PeerManager>,), Error = std::convert::Infallible> + Clone {
+    warp::any().map(move || peer_manager.clone())
+}
+
+fn with_network_controller(
+    network_controller: ResourceHandle<NetworkController>,
+) -> impl Filter<Extract = (ResourceHandle<NetworkController>,), Error = std::convert::Infallible> + Clone {
+    warp::any().map(move || network_controller.clone())
 }

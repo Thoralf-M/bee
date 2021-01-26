@@ -4,21 +4,24 @@
 use crate::{
     packet::MessageRequest,
     peer::PeerManager,
+    storage::StorageBackend,
     worker::{MetricsWorker, PeerManagerResWorker},
     ProtocolMetrics, Sender,
 };
 
 use bee_message::{milestone::MilestoneIndex, MessageId};
-use bee_network::NetworkController;
 use bee_runtime::{node::Node, shutdown_stream::ShutdownStream, worker::Worker};
+use bee_tangle::{MsTangle, TangleWorker};
 
 use async_trait::async_trait;
 use futures::StreamExt;
+use fxhash::FxBuildHasher;
 use log::{debug, info, trace};
 use tokio::{
     sync::{mpsc, RwLock},
     time::interval,
 };
+use tokio_stream::wrappers::{IntervalStream, UnboundedReceiverStream};
 
 use std::{
     any::TypeId,
@@ -30,7 +33,7 @@ use std::{
 const RETRY_INTERVAL_MS: u64 = 2500;
 
 #[derive(Default)]
-pub(crate) struct RequestedMessages(RwLock<HashMap<MessageId, (MilestoneIndex, Instant)>>);
+pub(crate) struct RequestedMessages(RwLock<HashMap<MessageId, (MilestoneIndex, Instant), FxBuildHasher>>);
 
 impl RequestedMessages {
     pub async fn contains(&self, message_id: &MessageId) -> bool {
@@ -38,7 +41,8 @@ impl RequestedMessages {
     }
 
     pub async fn insert(&self, message_id: MessageId, index: MilestoneIndex) {
-        self.0.write().await.insert(message_id, (index, Instant::now()));
+        let now = Instant::now();
+        self.0.write().await.insert(message_id, (index, now));
     }
 
     pub async fn len(&self) -> usize {
@@ -59,7 +63,6 @@ pub(crate) struct MessageRequesterWorker {
 async fn process_request(
     message_id: MessageId,
     index: MilestoneIndex,
-    network: &NetworkController,
     peer_manager: &PeerManager,
     metrics: &ProtocolMetrics,
     requested_messages: &RequestedMessages,
@@ -73,7 +76,7 @@ async fn process_request(
         return;
     }
 
-    if process_request_unchecked(message_id, index, network, peer_manager, metrics, counter).await {
+    if process_request_unchecked(message_id, index, peer_manager, metrics, counter).await {
         requested_messages.insert(message_id, index).await;
     }
 }
@@ -82,7 +85,6 @@ async fn process_request(
 async fn process_request_unchecked(
     message_id: MessageId,
     index: MilestoneIndex,
-    network: &NetworkController,
     peer_manager: &PeerManager,
     metrics: &ProtocolMetrics,
     counter: &mut usize,
@@ -97,7 +99,6 @@ async fn process_request_unchecked(
         if let Some(peer) = peer_manager.get(peer_id).await {
             if (*peer).0.has_data(index) {
                 Sender::<MessageRequest>::send(
-                    network,
                     peer_manager,
                     metrics,
                     peer_id,
@@ -119,7 +120,6 @@ async fn process_request_unchecked(
         if let Some(peer) = peer_manager.get(peer_id).await {
             if (*peer).0.maybe_has_data(index) {
                 Sender::<MessageRequest>::send(
-                    network,
                     peer_manager,
                     metrics,
                     peer_id,
@@ -134,24 +134,35 @@ async fn process_request_unchecked(
     requested
 }
 
-async fn retry_requests(
-    network: &NetworkController,
+async fn retry_requests<B: StorageBackend>(
     requested_messages: &RequestedMessages,
     peer_manager: &PeerManager,
     metrics: &ProtocolMetrics,
+    tangle: &MsTangle<B>,
     counter: &mut usize,
 ) {
     if peer_manager.is_empty().await {
         return;
     }
 
+    let now = Instant::now();
     let mut retry_counts: usize = 0;
+    let mut to_retry = Vec::with_capacity(1024);
 
     // TODO this needs abstraction
     for (message_id, (index, instant)) in requested_messages.0.read().await.iter() {
-        if (Instant::now() - *instant).as_millis() as u64 > RETRY_INTERVAL_MS
-            && process_request_unchecked(*message_id, *index, network, peer_manager, metrics, counter).await
+        if now
+            .checked_duration_since(*instant)
+            .map_or(false, |d| d.as_millis() as u64 > RETRY_INTERVAL_MS)
         {
+            to_retry.push((*message_id, *index));
+        }
+    }
+
+    for (message_id, index) in to_retry {
+        if tangle.contains(&message_id).await {
+            requested_messages.remove(&message_id).await;
+        } else if process_request_unchecked(message_id, index, peer_manager, metrics, counter).await {
             retry_counts += 1;
         }
     }
@@ -162,12 +173,20 @@ async fn retry_requests(
 }
 
 #[async_trait]
-impl<N: Node> Worker<N> for MessageRequesterWorker {
+impl<N: Node> Worker<N> for MessageRequesterWorker
+where
+    N::Backend: StorageBackend,
+{
     type Config = ();
     type Error = Infallible;
 
     fn dependencies() -> &'static [TypeId] {
-        vec![TypeId::of::<PeerManagerResWorker>(), TypeId::of::<MetricsWorker>()].leak()
+        vec![
+            TypeId::of::<PeerManagerResWorker>(),
+            TypeId::of::<MetricsWorker>(),
+            TypeId::of::<TangleWorker>(),
+        ]
+        .leak()
     }
 
     async fn start(node: &mut N, _config: Self::Config) -> Result<Self, Self::Error> {
@@ -177,14 +196,13 @@ impl<N: Node> Worker<N> for MessageRequesterWorker {
         node.register_resource(requested_messages);
 
         let requested_messages = node.resource::<RequestedMessages>();
-        let network = node.resource::<NetworkController>();
         let peer_manager = node.resource::<PeerManager>();
         let metrics = node.resource::<ProtocolMetrics>();
 
         node.spawn::<Self, _, _>(|shutdown| async move {
             info!("Requester running.");
 
-            let mut receiver = ShutdownStream::new(shutdown, rx);
+            let mut receiver = ShutdownStream::new(shutdown, UnboundedReceiverStream::new(rx));
             let mut counter: usize = 0;
 
             while let Some(MessageRequesterWorkerEvent(message_id, index)) = receiver.next().await {
@@ -193,7 +211,6 @@ impl<N: Node> Worker<N> for MessageRequesterWorker {
                 process_request(
                     message_id,
                     index,
-                    &network,
                     &peer_manager,
                     &metrics,
                     &requested_messages,
@@ -205,19 +222,22 @@ impl<N: Node> Worker<N> for MessageRequesterWorker {
             info!("Requester stopped.");
         });
 
+        let tangle = node.resource::<MsTangle<N::Backend>>();
         let requested_messages = node.resource::<RequestedMessages>();
-        let network = node.resource::<NetworkController>();
         let peer_manager = node.resource::<PeerManager>();
         let metrics = node.resource::<ProtocolMetrics>();
 
         node.spawn::<Self, _, _>(|shutdown| async move {
             info!("Retryer running.");
 
-            let mut ticker = ShutdownStream::new(shutdown, interval(Duration::from_millis(RETRY_INTERVAL_MS)));
+            let mut ticker = ShutdownStream::new(
+                shutdown,
+                IntervalStream::new(interval(Duration::from_millis(RETRY_INTERVAL_MS))),
+            );
             let mut counter: usize = 0;
 
             while ticker.next().await.is_some() {
-                retry_requests(&network, &requested_messages, &peer_manager, &metrics, &mut counter).await;
+                retry_requests(&requested_messages, &peer_manager, &metrics, &tangle, &mut counter).await;
             }
 
             info!("Retryer stopped.");

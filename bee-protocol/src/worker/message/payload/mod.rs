@@ -9,16 +9,17 @@ pub(crate) use indexation::{IndexationPayloadWorker, IndexationPayloadWorkerEven
 pub(crate) use milestone::{MilestonePayloadWorker, MilestonePayloadWorkerEvent};
 pub(crate) use transaction::{TransactionPayloadWorker, TransactionPayloadWorkerEvent};
 
-use crate::{storage::StorageBackend, worker::TangleWorker};
+use crate::storage::StorageBackend;
 
 use bee_message::{payload::Payload, MessageId};
 use bee_runtime::{node::Node, shutdown_stream::ShutdownStream, worker::Worker};
-use bee_tangle::MsTangle;
+use bee_tangle::{MsTangle, TangleWorker};
 
 use async_trait::async_trait;
-use futures::stream::StreamExt;
-use log::{debug, info, warn};
+use futures::{future::FutureExt, stream::StreamExt};
+use log::{debug, error, info};
 use tokio::sync::mpsc;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use std::{any::TypeId, convert::Infallible};
 
@@ -40,7 +41,7 @@ async fn process<B: StorageBackend>(
         match message.payload() {
             Some(Payload::Transaction(_)) => {
                 if let Err(e) = transaction_payload_worker.send(TransactionPayloadWorkerEvent(message_id)) {
-                    warn!(
+                    error!(
                         "Sending message id {} to transaction payload worker failed: {:?}.",
                         message_id, e
                     );
@@ -48,7 +49,7 @@ async fn process<B: StorageBackend>(
             }
             Some(Payload::Milestone(_)) => {
                 if let Err(e) = milestone_payload_worker.send(MilestonePayloadWorkerEvent(message_id)) {
-                    warn!(
+                    error!(
                         "Sending message id {} to milestone payload worker failed: {:?}.",
                         message_id, e
                     );
@@ -56,18 +57,13 @@ async fn process<B: StorageBackend>(
             }
             Some(Payload::Indexation(_)) => {
                 if let Err(e) = indexation_payload_worker.send(IndexationPayloadWorkerEvent(message_id)) {
-                    warn!(
+                    error!(
                         "Sending message id {} to indexation payload worker failed: {:?}.",
                         message_id, e
                     );
                 }
             }
-            Some(_) => {
-                // TODO
-            }
-            None => {
-                // TODO
-            }
+            _ => {}
         }
     }
 }
@@ -101,7 +97,7 @@ where
         node.spawn::<Self, _, _>(|shutdown| async move {
             info!("Running.");
 
-            let mut receiver = ShutdownStream::new(shutdown, rx);
+            let mut receiver = ShutdownStream::new(shutdown, UnboundedReceiverStream::new(rx));
 
             while let Some(PayloadWorkerEvent(message_id)) = receiver.next().await {
                 process(
@@ -114,11 +110,13 @@ where
                 .await;
             }
 
-            let (_, mut receiver) = receiver.split();
-            let receiver = receiver.get_mut();
-            let mut count = 0;
+            // Before the worker completely stops, the receiver needs to be drained for payloads to be analysed.
+            // Otherwise, information would be lost and not easily recoverable.
 
-            while let Ok(PayloadWorkerEvent(message_id)) = receiver.try_recv() {
+            let (_, mut receiver) = receiver.split();
+            let mut count: usize = 0;
+
+            while let Some(Some(PayloadWorkerEvent(message_id))) = receiver.next().now_or_never() {
                 process(
                     &tangle,
                     message_id,
@@ -130,7 +128,7 @@ where
                 count += 1;
             }
 
-            debug!("Drained {} message ids.", count);
+            debug!("Drained {} messages.", count);
 
             info!("Stopped.");
         });

@@ -14,14 +14,14 @@ use bee_message::{
 };
 
 use async_trait::async_trait;
-use rocksdb::{ColumnFamilyDescriptor, DBCompactionStyle, DBCompressionType, Options, SliceTransform, DB};
+use rocksdb::{ColumnFamilyDescriptor, DBCompactionStyle, DBCompressionType, Env, Options, SliceTransform, DB};
 
 pub const CF_MESSAGE_ID_TO_MESSAGE: &str = "message_id_to_message";
 pub const CF_MESSAGE_ID_TO_METADATA: &str = "message_id_to_metadata";
 pub const CF_MESSAGE_ID_TO_MESSAGE_ID: &str = "message_id_to_message_id";
 pub const CF_INDEX_TO_MESSAGE_ID: &str = "index_to_message_id";
-pub const CF_OUTPUT_ID_TO_OUTPUT: &str = "output_id_to_output";
-pub const CF_OUTPUT_ID_TO_SPENT: &str = "output_id_to_spent";
+pub const CF_OUTPUT_ID_TO_CREATED_OUTPUT: &str = "output_id_to_created_output";
+pub const CF_OUTPUT_ID_TO_CONSUMED_OUTPUT: &str = "output_id_to_consumed_output";
 pub const CF_OUTPUT_ID_UNSPENT: &str = "output_id_unspent";
 pub const CF_ED25519_ADDRESS_TO_OUTPUT_ID: &str = "ed25519_address_to_output_id";
 pub const CF_LEDGER_INDEX: &str = "ledger_index";
@@ -52,9 +52,11 @@ impl Storage {
         options.set_prefix_extractor(prefix_extractor);
         let cf_index_to_message_id = ColumnFamilyDescriptor::new(CF_INDEX_TO_MESSAGE_ID, options);
 
-        let cf_output_id_to_output = ColumnFamilyDescriptor::new(CF_OUTPUT_ID_TO_OUTPUT, Options::default());
+        let cf_output_id_to_created_output =
+            ColumnFamilyDescriptor::new(CF_OUTPUT_ID_TO_CREATED_OUTPUT, Options::default());
 
-        let cf_output_id_to_spent = ColumnFamilyDescriptor::new(CF_OUTPUT_ID_TO_SPENT, Options::default());
+        let cf_output_id_to_consumed_output =
+            ColumnFamilyDescriptor::new(CF_OUTPUT_ID_TO_CONSUMED_OUTPUT, Options::default());
 
         let cf_output_id_unspent = ColumnFamilyDescriptor::new(CF_OUTPUT_ID_UNSPENT, Options::default());
 
@@ -98,16 +100,24 @@ impl Storage {
         opts.set_compaction_readahead_size(config.set_compaction_readahead_size);
         opts.set_compaction_style(DBCompactionStyle::from(config.set_compaction_style));
         opts.set_max_write_buffer_number(config.set_max_write_buffer_number);
+        opts.set_write_buffer_size(config.set_write_buffer_size);
+        opts.set_db_write_buffer_size(config.set_db_write_buffer_size);
         opts.set_disable_auto_compactions(config.set_disable_auto_compactions);
         opts.set_compression_type(DBCompressionType::from(config.set_compression_type));
+        opts.set_unordered_write(config.set_unordered_write);
+
+        let mut env = Env::default()?;
+        env.set_background_threads(config.env.set_background_threads);
+        env.set_high_priority_background_threads(config.env.set_high_priority_background_threads);
+        opts.set_env(&env);
 
         let column_familes = vec![
             cf_message_id_to_message,
             cf_message_id_to_metadata,
             cf_message_id_to_message_id,
             cf_index_to_message_id,
-            cf_output_id_to_output,
-            cf_output_id_to_spent,
+            cf_output_id_to_created_output,
+            cf_output_id_to_consumed_output,
             cf_output_id_unspent,
             cf_ed25519_address_to_output_id,
             cf_ledger_index,

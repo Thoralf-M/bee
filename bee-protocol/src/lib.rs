@@ -17,9 +17,10 @@ mod sender;
 mod worker;
 
 pub use metrics::ProtocolMetrics;
+pub use peer::{Peer, PeerManager, PeerMetrics};
 pub use storage::StorageBackend;
 pub use worker::{
-    MessageSubmitterError, MessageSubmitterWorker, MessageSubmitterWorkerEvent, MetricsWorker, TangleWorker,
+    MessageSubmitterError, MessageSubmitterWorker, MessageSubmitterWorkerEvent, MetricsWorker, PeerManagerResWorker,
 };
 
 use crate::{
@@ -28,9 +29,8 @@ use crate::{
     worker::{
         BroadcasterWorker, HasherWorker, HeartbeaterWorker, IndexationPayloadWorker, MessageRequesterWorker,
         MessageResponderWorker, MilestoneConeUpdaterWorker, MilestonePayloadWorker, MilestoneRequesterWorker,
-        MilestoneResponderWorker, MilestoneSolidifierWorker, MpsWorker, PayloadWorker, PeerManagerResWorker,
-        PeerManagerWorker, ProcessorWorker, PropagatorWorker, StatusWorker, TipPoolCleanerWorker,
-        TransactionPayloadWorker,
+        MilestoneResponderWorker, MilestoneSolidifierWorker, MpsWorker, PayloadWorker, PeerManagerWorker,
+        ProcessorWorker, PropagatorWorker, StatusWorker, TipPoolCleanerWorker, TransactionPayloadWorker,
     },
 };
 
@@ -47,7 +47,6 @@ where
     N::Backend: StorageBackend,
 {
     node_builder
-        .with_worker::<TangleWorker>()
         .with_worker::<MetricsWorker>()
         .with_worker::<PeerManagerResWorker>()
         .with_worker_cfg::<PeerManagerWorker>(events)

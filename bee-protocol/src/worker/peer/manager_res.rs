@@ -11,7 +11,7 @@ use async_trait::async_trait;
 
 use std::convert::Infallible;
 
-pub(crate) struct PeerManagerResWorker {}
+pub struct PeerManagerResWorker {}
 
 #[async_trait]
 impl<N: Node> Worker<N> for PeerManagerResWorker {
@@ -26,9 +26,11 @@ impl<N: Node> Worker<N> for PeerManagerResWorker {
 
     async fn stop(self, node: &mut N) -> Result<(), Self::Error> {
         if let Some(peer_manager) = node.remove_resource::<PeerManager>() {
-            for (_, (_, _, shutdown)) in peer_manager.peers.into_inner() {
-                // TODO: Should we handle this error?
-                let _ = shutdown.send(());
+            for (_, (_, sender)) in peer_manager.peers.into_inner() {
+                if let Some(sender) = sender {
+                    // TODO: Should we handle this error?
+                    let _ = sender.1.send(());
+                }
             }
         }
 

@@ -4,7 +4,11 @@
 use crate::{
     config::NodeConfig,
     constants::{BEE_GIT_COMMIT, BEE_VERSION},
-    plugins::Dashboard,
+    plugins::dashboard::{
+        broadcast,
+        websocket::{responses::node_status, WsUsers},
+        Dashboard,
+    },
     storage::StorageBackend,
 };
 
@@ -16,8 +20,8 @@ use log::debug;
 use serde::Serialize;
 use std::time::Instant;
 use tokio::time::interval;
+use tokio_stream::wrappers::IntervalStream;
 
-use bee_rest_api::handlers::health::is_healthy;
 use std::time::Duration;
 
 use cap::Cap;
@@ -28,22 +32,22 @@ pub static ALLOCATOR: Cap<alloc::System> = Cap::new(alloc::System, usize::max_va
 
 const NODE_STATUS_METRICS_WORKER_INTERVAL_SEC: u64 = 1;
 
-pub(crate) fn node_status_worker<N>(node: &mut N)
+pub(crate) fn node_status_worker<N>(node: &mut N, users: &WsUsers)
 where
     N: Node,
     N::Backend: StorageBackend,
 {
-    let bus = node.bus();
     let tangle = node.resource::<MsTangle<N::Backend>>();
     let node_config = node.resource::<NodeConfig<N::Backend>>();
     let peering_config = node_config.peering.clone();
+    let users = users.clone();
 
     node.spawn::<Dashboard, _, _>(|shutdown| async move {
-        debug!("Ws `node_status_worker` running.");
+        debug!("Ws NodeStatus topic handler running.");
 
         let mut ticker = ShutdownStream::new(
             shutdown,
-            interval(Duration::from_secs(NODE_STATUS_METRICS_WORKER_INTERVAL_SEC)),
+            IntervalStream::new(interval(Duration::from_secs(NODE_STATUS_METRICS_WORKER_INTERVAL_SEC))),
         );
         let uptime = Instant::now();
         let version = if BEE_GIT_COMMIT.is_empty() {
@@ -53,18 +57,17 @@ where
         };
 
         while ticker.next().await.is_some() {
-            bus.dispatch(NodeStatus {
+            let status = NodeStatus {
                 snapshot_index: *tangle.get_snapshot_index(),
                 pruning_index: *tangle.get_pruning_index(),
-                is_healthy: is_healthy(tangle.clone()).await, /* TODO: move is_healthy() from bee-rest-api to
-                                                               * bee-tangle eventually */
+                is_healthy: tangle.is_healthy().await,
                 is_synced: tangle.is_synced(),
                 version: version.clone(),
-                latest_version: String::from(env!("CARGO_PKG_VERSION")),
+                latest_version: version.clone(),
                 uptime: uptime.elapsed().as_millis() as u64,
                 autopeering_id: peering_config.peer_id.to_string(),
                 node_alias: node_config.alias.clone(),
-                bech32_hrp: "iota".to_string(),
+                bech32_hrp: node_config.bech32_hrp.clone(),
                 connected_peers_count: 0,
                 current_requested_ms: 0,
                 request_queue_queued: 0,
@@ -108,10 +111,11 @@ where
                     messages: Messages { size: 0 },
                     incoming_message_work_units: IncomingMessageWorkUnits { size: 0 },
                 },
-            });
+            };
+            broadcast(node_status::forward(status), &users).await;
         }
 
-        debug!("Ws `node_status_worker` stopped.");
+        debug!("Ws NodeStatus topic handler stopped.");
     });
 }
 
