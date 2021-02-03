@@ -1,7 +1,7 @@
 // Copyright 2020 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{Error, MessageId};
+use crate::{payload::Payload, Error, MessageId,MESSAGE_ID_LENGTH};
 
 use bee_common::packable::{Packable, Read, Write};
 
@@ -16,28 +16,27 @@ pub const MILESTONE_PUBLIC_KEY_LENGTH: usize = 32;
 pub struct MilestonePayloadEssence {
     index: u32,
     timestamp: u64,
-    parent1: MessageId,
-    parent2: MessageId,
+    parents: Vec<MessageId>,
     merkle_proof: [u8; MILESTONE_MERKLE_PROOF_LENGTH],
     public_keys: Vec<[u8; MILESTONE_PUBLIC_KEY_LENGTH]>,
+    receipt: Option<Payload>,
 }
 
 impl MilestonePayloadEssence {
     pub fn new(
         index: u32,
         timestamp: u64,
-        parent1: MessageId,
-        parent2: MessageId,
+        parents: Vec<MessageId>,
         merkle_proof: [u8; MILESTONE_MERKLE_PROOF_LENGTH],
         public_keys: Vec<[u8; MILESTONE_PUBLIC_KEY_LENGTH]>,
     ) -> Self {
         Self {
             index,
             timestamp,
-            parent1,
-            parent2,
+            parents,
             merkle_proof,
             public_keys,
+            receipt: None,
         }
     }
 
@@ -49,12 +48,8 @@ impl MilestonePayloadEssence {
         self.timestamp
     }
 
-    pub fn parent1(&self) -> &MessageId {
-        &self.parent1
-    }
-
-    pub fn parent2(&self) -> &MessageId {
-        &self.parent2
+    pub fn parents(&self) -> &[MessageId] {
+        &self.parents
     }
 
     pub fn merkle_proof(&self) -> &[u8] {
@@ -64,6 +59,10 @@ impl MilestonePayloadEssence {
     pub fn public_keys(&self) -> &Vec<[u8; MILESTONE_PUBLIC_KEY_LENGTH]> {
         &self.public_keys
     }
+
+    pub fn receipt(&self) -> Option<&Payload> {
+        self.receipt.as_ref()
+    }
 }
 
 impl Packable for MilestonePayloadEssence {
@@ -72,11 +71,13 @@ impl Packable for MilestonePayloadEssence {
     fn packed_len(&self) -> usize {
         self.index.packed_len()
             + self.timestamp.packed_len()
-            + self.parent1.packed_len()
-            + self.parent2.packed_len()
+            + 0u8.packed_len()
+            + self.parents.len() * MESSAGE_ID_LENGTH
             + MILESTONE_MERKLE_PROOF_LENGTH
             + 0u8.packed_len()
             + self.public_keys.len() * MILESTONE_PUBLIC_KEY_LENGTH
+            + 0u32.packed_len()
+            + self.receipt.iter().map(Packable::packed_len).sum::<usize>()
     }
 
     fn pack<W: Write>(&self, writer: &mut W) -> Result<(), Self::Error> {
@@ -84,8 +85,11 @@ impl Packable for MilestonePayloadEssence {
 
         self.timestamp.pack(writer)?;
 
-        self.parent1.pack(writer)?;
-        self.parent2.pack(writer)?;
+        (self.parents().len() as u8).pack(writer)?;
+
+        for parent in self.parents().iter() {
+            parent.pack(writer)?;
+        }
 
         writer.write_all(&self.merkle_proof)?;
 
@@ -93,6 +97,14 @@ impl Packable for MilestonePayloadEssence {
 
         for public_key in &self.public_keys {
             writer.write_all(public_key)?;
+        }
+
+        match self.receipt {
+            Some(ref receipt) => {
+                (receipt.packed_len() as u32).pack(writer)?;
+                receipt.pack(writer)?;
+            }
+            None => 0u32.pack(writer)?,
         }
 
         Ok(())
@@ -103,8 +115,16 @@ impl Packable for MilestonePayloadEssence {
 
         let timestamp = u64::unpack(reader)?;
 
-        let parent1 = MessageId::unpack(reader)?;
-        let parent2 = MessageId::unpack(reader)?;
+        let parents_len = u8::unpack(reader)? as usize;
+
+        if parents_len != 2 {
+            return Err(Error::InvalidParentsCount(parents_len));
+        }
+
+        let mut parents = Vec::with_capacity(parents_len);
+        for _ in 0..parents_len {
+            parents.push(MessageId::unpack(reader)?);
+        }
 
         let mut merkle_proof = [0u8; MILESTONE_MERKLE_PROOF_LENGTH];
         reader.read_exact(&mut merkle_proof)?;
@@ -117,13 +137,29 @@ impl Packable for MilestonePayloadEssence {
             public_keys.push(public_key);
         }
 
+        let receipt_len = u32::unpack(reader)? as usize;
+        let receipt = if receipt_len > 0 {
+            let receipt = Payload::unpack(reader)?;
+            if receipt_len != receipt.packed_len() {
+                return Err(Self::Error::InvalidAnnouncedLength(receipt_len, receipt.packed_len()));
+            }
+            if !matches!(receipt, Payload::Receipt(_)) {
+                return Err(Error::InvalidPayloadKind(receipt.kind()));
+            }
+            Some(receipt)
+        } else {
+            None
+        };
+
+        // TODO builder ?
+
         Ok(Self {
             index,
             timestamp,
-            parent1,
-            parent2,
+            parents,
             merkle_proof,
             public_keys,
+            receipt,
         })
     }
 }

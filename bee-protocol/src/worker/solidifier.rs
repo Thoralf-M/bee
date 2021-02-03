@@ -7,9 +7,8 @@ use crate::{
     peer::PeerManager,
     storage::StorageBackend,
     worker::{
-        MessageRequesterWorker, MessageRequesterWorkerEvent, MetricsWorker, MilestoneConeUpdaterWorker,
-        MilestoneConeUpdaterWorkerEvent, MilestoneRequesterWorker, PeerManagerResWorker, RequestedMessages,
-        RequestedMilestones,
+        IndexUpdaterWorker, IndexUpdaterWorkerEvent, MessageRequesterWorker, MessageRequesterWorkerEvent,
+        MetricsWorker, MilestoneRequesterWorker, PeerManagerResWorker, RequestedMessages, RequestedMilestones,
     },
     ProtocolMetrics,
 };
@@ -42,7 +41,7 @@ async fn heavy_solidification<B: StorageBackend>(
     requested_messages: &RequestedMessages,
     target_index: MilestoneIndex,
     target_id: MessageId,
-) {
+) -> usize {
     // TODO: This wouldn't be necessary if the traversal code wasn't closure-driven
     let mut missing = Vec::new();
 
@@ -56,22 +55,19 @@ async fn heavy_solidification<B: StorageBackend>(
     )
     .await;
 
-    debug!(
-        "Heavy solidification of milestone {} {}: {} messages requested.",
-        *target_index,
-        target_id,
-        missing.len()
-    );
+    let missing_len = missing.len();
 
     for missing_id in missing {
         helper::request_message(tangle, message_requester, requested_messages, missing_id, target_index).await;
     }
+
+    missing_len
 }
 
 async fn solidify<B: StorageBackend>(
     tangle: &MsTangle<B>,
     ledger_worker: &mpsc::UnboundedSender<LedgerWorkerEvent>,
-    milestone_cone_updater: &mpsc::UnboundedSender<MilestoneConeUpdaterWorkerEvent>,
+    index_updater_worker: &mpsc::UnboundedSender<IndexUpdaterWorkerEvent>,
     peer_manager: &PeerManager,
     metrics: &ProtocolMetrics,
     bus: &Bus<'static>,
@@ -86,21 +82,14 @@ async fn solidify<B: StorageBackend>(
         warn!("Sending message_id to ledger worker failed: {}.", e);
     }
 
-    if let Err(e) = milestone_cone_updater
+    if let Err(e) = index_updater_worker
         // TODO get MS
-        .send(MilestoneConeUpdaterWorkerEvent(index, Milestone::new(id, 0)))
+        .send(IndexUpdaterWorkerEvent(index, Milestone::new(id, 0)))
     {
-        warn!("Sending message_id to `MilestoneConeUpdater` failed: {:?}.", e);
+        warn!("Sending message_id to `IndexUpdater` failed: {:?}.", e);
     }
 
-    helper::broadcast_heartbeat(
-        &peer_manager,
-        &metrics,
-        index,
-        tangle.get_pruning_index(),
-        tangle.get_latest_milestone_index(),
-    )
-    .await;
+    helper::broadcast_heartbeat(&peer_manager, &metrics, &tangle).await;
 
     bus.dispatch(LatestSolidMilestoneChanged {
         index,
@@ -125,7 +114,7 @@ where
             TypeId::of::<PeerManagerResWorker>(),
             TypeId::of::<MetricsWorker>(),
             TypeId::of::<LedgerWorker>(),
-            TypeId::of::<MilestoneConeUpdaterWorker>(),
+            TypeId::of::<IndexUpdaterWorker>(),
         ]
         .leak()
     }
@@ -135,7 +124,7 @@ where
         let message_requester = node.worker::<MessageRequesterWorker>().unwrap().tx.clone();
         let milestone_requester = node.worker::<MilestoneRequesterWorker>().unwrap().tx.clone();
         let ledger_worker = node.worker::<LedgerWorker>().unwrap().tx.clone();
-        let milestone_cone_updater = node.worker::<MilestoneConeUpdaterWorker>().unwrap().tx.clone();
+        let milestone_cone_updater = node.worker::<IndexUpdaterWorker>().unwrap().tx.clone();
         let tangle = node.resource::<MsTangle<N::Backend>>();
         let requested_messages = node.resource::<RequestedMessages>();
         let requested_milestones = node.resource::<RequestedMilestones>();
@@ -164,15 +153,23 @@ where
                 if index < next {
                     if let Some(message_id) = tangle.get_milestone_message_id(index).await {
                         if let Some(message) = tangle.get(&message_id).await {
-                            debug!("Light solidification of milestone {} {}.", index, message_id);
-                            helper::request_message(
-                                &tangle,
-                                &message_requester,
-                                &requested_messages,
-                                *message.parent2(),
+                            debug!(
+                                "Light solidification of milestone {} {} in [{};{}].",
                                 index,
-                            )
-                            .await;
+                                message_id,
+                                *lsmi + 1,
+                                *next - 1
+                            );
+                            for parent in message.parents().iter() {
+                                helper::request_message(
+                                    &tangle,
+                                    &message_requester,
+                                    &requested_messages,
+                                    *parent,
+                                    index,
+                                )
+                                .await;
+                            }
                         } else {
                             error!("Requested milestone {} message not present in the tangle.", index)
                         }
@@ -199,7 +196,17 @@ where
                             .await;
                         } else {
                             // TODO Is this actually necessary ?
-                            heavy_solidification(&tangle, &message_requester, &requested_messages, target, id).await;
+                            let missing_len =
+                                heavy_solidification(&tangle, &message_requester, &requested_messages, target, id)
+                                    .await;
+                            debug!(
+                                "Heavy solidification of milestone {} {}: {} messages requested in [{};{}].",
+                                target,
+                                id,
+                                missing_len,
+                                *lsmi + 1,
+                                *next - 1
+                            );
                             break;
                         }
                     } else {

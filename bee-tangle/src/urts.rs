@@ -7,11 +7,9 @@ use bee_message::MessageId;
 
 use log::debug;
 use rand::seq::IteratorRandom;
+use hashbrown::{hash_map::Entry, HashMap, HashSet};
 
-use std::{
-    collections::{hash_map::Entry, HashMap, HashSet},
-    time::Instant,
-};
+use std::time::Instant;
 
 enum Score {
     NonLazy,
@@ -27,7 +25,7 @@ const YTRSI_DELTA: u32 = 8;
 const OTRSI_DELTA: u32 = 13;
 // M: the maximum allowed delta value between OTRSI of a given message in relation to the current LSMI before it
 // gets lazy.
-const BELOW_MAX_DEPTH: u32 = 15;
+pub const BELOW_MAX_DEPTH: u32 = 15;
 // If the amount of non-lazy tips exceed this limit, remove the parent(s) of the inserted tip to compensate for the
 // excess. This rule helps to reduce the amount of tips in the network.
 const MAX_LIMIT_NON_LAZY: u8 = 100;
@@ -65,23 +63,23 @@ impl UrtsTipPool {
         &mut self,
         tangle: &MsTangle<B>,
         message_id: MessageId,
-        parent1: MessageId,
-        parent2: MessageId,
+        parents: Vec<MessageId>,
     ) {
         if let Score::NonLazy = self.tip_score::<B>(tangle, &message_id).await {
             self.non_lazy_tips.insert(message_id);
             self.tips.insert(message_id, TipMetadata::new());
-            self.link_parents_with_child(&message_id, &parent1, &parent2);
-            self.check_retention_rules_for_parents(&parent1, &parent2);
+            self.link_parents_with_child(&message_id, &parents);
+            self.check_retention_rules_for_parents(&parents);
         }
     }
 
-    fn link_parents_with_child(&mut self, hash: &MessageId, parent1: &MessageId, parent2: &MessageId) {
-        if parent1 == parent2 {
-            self.add_child(*parent1, *hash);
-        } else {
-            self.add_child(*parent1, *hash);
-            self.add_child(*parent2, *hash);
+    fn link_parents_with_child(&mut self, child: &MessageId, parents: &Vec<MessageId>) {
+        let mut linked = Vec::new();
+        for parent in parents {
+            if !linked.contains(parent) {
+                self.add_child(*parent, *child);
+                linked.push(*parent);
+            }
         }
     }
 
@@ -103,12 +101,13 @@ impl UrtsTipPool {
         }
     }
 
-    fn check_retention_rules_for_parents(&mut self, parent1: &MessageId, parent2: &MessageId) {
-        if parent1 == parent2 {
-            self.check_retention_rules_for_parent(parent1);
-        } else {
-            self.check_retention_rules_for_parent(parent1);
-            self.check_retention_rules_for_parent(parent2);
+    fn check_retention_rules_for_parents(&mut self, parents: &Vec<MessageId>) {
+        let mut checked = Vec::new();
+        for parent in parents {
+            if !checked.contains(parent) {
+                self.check_retention_rules_for_parent(parent);
+                checked.push(*parent);
+            }
         }
     }
 
@@ -157,8 +156,8 @@ impl UrtsTipPool {
         }
 
         let lsmi = *tangle.get_latest_solid_milestone_index();
-        let otrsi = *tangle.otrsi(&hash).await.unwrap();
-        let ytrsi = *tangle.ytrsi(&hash).await.unwrap();
+        let otrsi = *tangle.otrsi(&hash).await.unwrap().index();
+        let ytrsi = *tangle.ytrsi(&hash).await.unwrap().index();
 
         if (lsmi - ytrsi) > YTRSI_DELTA {
             return Score::Lazy;
@@ -175,21 +174,27 @@ impl UrtsTipPool {
         Score::NonLazy
     }
 
-    pub fn two_non_lazy_tips(&self) -> Option<(MessageId, MessageId)> {
+    pub fn two_non_lazy_tips(&self) -> Option<Vec<MessageId>> {
         let non_lazy_tips = &self.non_lazy_tips;
         if non_lazy_tips.is_empty() {
             None
-        } else if non_lazy_tips.len() == 1 {
-            let tip = non_lazy_tips.iter().next().unwrap();
-            Some((*tip, *tip))
-        } else if non_lazy_tips.len() == 2 {
-            let mut iter = non_lazy_tips.iter();
-            Some((*iter.next().unwrap(), *iter.next().unwrap()))
         } else {
-            let hashes = non_lazy_tips.iter().choose_multiple(&mut rand::thread_rng(), 2);
-            let mut iter = hashes.iter();
-            Some((**iter.next().unwrap(), **iter.next().unwrap()))
+            Some(if non_lazy_tips.len() < self.optimal_num_tips() {
+                non_lazy_tips.iter().map(|t| *t).collect()
+            } else {
+                non_lazy_tips
+                    .iter()
+                    .choose_multiple(&mut rand::thread_rng(), self.optimal_num_tips())
+                    .iter()
+                    .map(|t| **t)
+                    .collect()
+            })
         }
+    }
+
+    pub(crate) fn optimal_num_tips(&self) -> usize {
+        // TODO: hardcoded at the moment
+        4
     }
 
     pub(crate) fn reduce_tips(&mut self) {

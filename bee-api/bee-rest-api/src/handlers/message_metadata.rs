@@ -47,7 +47,7 @@ pub(crate) async fn message_metadata<B: StorageBackend>(
                 let should_promote;
                 let should_reattach;
 
-                if let Some(milestone) = metadata.cone_index() {
+                if let Some(milestone) = metadata.milestone_index() {
                     // message is referenced by a milestone
                     is_solid = true;
                     referenced_by_milestone_index = Some(*milestone);
@@ -86,10 +86,12 @@ pub(crate) async fn message_metadata<B: StorageBackend>(
 
                     let lsmi = *tangle.get_latest_solid_milestone_index();
                     // unwrap() of OTRSI/YTRSI is safe since message is solid
-                    if (lsmi - *metadata.otrsi().unwrap()) > below_max_depth {
+                    if (lsmi - *metadata.otrsi().unwrap().index()) > below_max_depth {
                         should_promote = Some(false);
                         should_reattach = Some(true);
-                    } else if (lsmi - *metadata.ytrsi().unwrap()) > ytrsi_delta || (lsmi - otrsi_delta) > otrsi_delta {
+                    } else if (lsmi - *metadata.ytrsi().unwrap().index()) > ytrsi_delta
+                        || (lsmi - otrsi_delta) > otrsi_delta
+                    {
                         should_promote = Some(true);
                         should_reattach = Some(false);
                     } else {
@@ -120,8 +122,7 @@ pub(crate) async fn message_metadata<B: StorageBackend>(
 
             Ok(warp::reply::json(&SuccessBody::new(MessageMetadataResponse {
                 message_id: message_id.to_string(),
-                parent_1_message_id: message.parent1().to_string(),
-                parent_2_message_id: message.parent2().to_string(),
+                parent_message_ids: message.parents().iter().map(|id| id.to_string()).collect(),
                 is_solid,
                 referenced_by_milestone_index,
                 milestone_index,
@@ -140,10 +141,8 @@ pub(crate) async fn message_metadata<B: StorageBackend>(
 pub struct MessageMetadataResponse {
     #[serde(rename = "messageId")]
     pub message_id: String,
-    #[serde(rename = "parent1MessageId")]
-    pub parent_1_message_id: String,
-    #[serde(rename = "parent2MessageId")]
-    pub parent_2_message_id: String,
+    #[serde(rename = "parentMessageIds")]
+    pub parent_message_ids: Vec<String>,
     #[serde(rename = "isSolid")]
     pub is_solid: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
