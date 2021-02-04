@@ -18,5 +18,5 @@ pub trait Provider: Sized {
     type Builder: ProviderBuilder<Provider = Self>;
     type Error: std::error::Error;
 
-    fn nonce(&self, bytes: &[u8], target_score: f64) -> Result<u64, Self::Error>;
+    fn nonce(&self, bytes: &[u8], target_score: f64, max_time_sec: u64) -> Result<u64, Self::Error>;
 }

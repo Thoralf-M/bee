@@ -39,7 +39,7 @@ impl Provider for Constant {
     type Builder = ConstantBuilder;
     type Error = std::convert::Infallible;
 
-    fn nonce(&self, _: &[u8], _: f64) -> Result<u64, Self::Error> {
+    fn nonce(&self, _: &[u8], _: f64, _: u64) -> Result<u64, Self::Error> {
         Ok(self.value)
     }
 }

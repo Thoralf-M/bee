@@ -141,7 +141,7 @@ pub struct MessageBuilder<P: Provider = Miner> {
     network_id: Option<u64>,
     parents: Option<Vec<MessageId>>,
     payload: Option<Payload>,
-    nonce_provider: Option<(P, f64)>,
+    nonce_provider: Option<(P, f64, u64)>,
 }
 
 impl<P: Provider> Default for MessageBuilder<P> {
@@ -175,8 +175,8 @@ impl<P: Provider> MessageBuilder<P> {
         self
     }
 
-    pub fn with_nonce_provider(mut self, nonce_provider: P, target_score: f64) -> Self {
-        self.nonce_provider = Some((nonce_provider, target_score));
+    pub fn with_nonce_provider(mut self, nonce_provider: P, target_score: f64, max_time_sec: u64) -> Self {
+        self.nonce_provider = Some((nonce_provider, target_score, max_time_sec));
         self
     }
 
@@ -201,12 +201,13 @@ impl<P: Provider> MessageBuilder<P> {
             return Err(Error::InvalidMessageLength(message_bytes.len()));
         }
 
-        let (nonce_provider, target_score) = self.nonce_provider.unwrap_or((P::Builder::new().finish(), 4000f64));
+        let (nonce_provider, target_score, max_time_sec) = self.nonce_provider.unwrap_or((P::Builder::new().finish(), 4000f64, 500));
 
         message.nonce = nonce_provider
             .nonce(
                 &message_bytes[..message_bytes.len() - std::mem::size_of::<u64>()],
                 target_score,
+                max_time_sec
             )
             .unwrap_or(0);
 

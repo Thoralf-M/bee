@@ -21,6 +21,7 @@ use std::{
         Arc,
     },
     thread,
+    time::{Duration, Instant},
 };
 
 const DEFAULT_NUM_WORKERS: usize = 1;
@@ -69,7 +70,9 @@ impl Miner {
         pow_digest: TritBuf<T1B1Buf>,
         start_nonce: u64,
         target_zeros: usize,
+        max_time_sec: u64,
     ) -> Result<u64, Error> {
+        let start = Instant::now();
         let mut nonce = start_nonce;
         let mut hasher = BatchHasher::<T1B1Buf>::new(HASH_LENGTH, CurlPRounds::Rounds81);
         let mut buffers = Vec::<TritBuf<T1B1Buf>>::with_capacity(BATCH_SIZE);
@@ -97,6 +100,10 @@ impl Miner {
             }
 
             nonce += BATCH_SIZE as u64;
+            if start.elapsed().as_secs() > max_time_sec {
+                println!("abbort max time");
+                return Err(Error::Cancelled);
+            }
         }
 
         Err(Error::Cancelled)
@@ -107,7 +114,7 @@ impl Provider for Miner {
     type Builder = MinerBuilder;
     type Error = Error;
 
-    fn nonce(&self, bytes: &[u8], target_score: f64) -> Result<u64, Self::Error> {
+    fn nonce(&self, bytes: &[u8], target_score: f64, max_time_sec: u64) -> Result<u64, Self::Error> {
         let mut nonce = 0;
         let mut blake = VarBlake2b::new(32).unwrap();
         let mut pow_digest = TritBuf::<T1B1Buf>::new();
@@ -126,9 +133,10 @@ impl Provider for Miner {
             let start_nonce = i as u64 * worker_width;
             let _done = done.clone();
             let _pow_digest = pow_digest.clone();
+            let _max_time_sec = max_time_sec.clone();
 
             workers.push(thread::spawn(move || {
-                Miner::worker(_done, _pow_digest, start_nonce, target_zeros)
+                Miner::worker(_done, _pow_digest, start_nonce, target_zeros, _max_time_sec)
             }));
         }
 
