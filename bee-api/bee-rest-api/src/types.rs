@@ -85,21 +85,12 @@ pub struct TreasuryInputDto {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum OutputDto {
-    SignatureLockedSingle(SignatureLockedSingleOutputDto),
-    SignatureLockedDustAllowance(SignatureLockedDustAllowanceOutputDto),
+    SignatureLockedOutputDto(SignatureLockedOutputDto),
     Treasury(TreasuryOutputDto),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SignatureLockedSingleOutputDto {
-    #[serde(rename = "type")]
-    pub kind: u8,
-    pub address: AddressDto,
-    pub amount: u64,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SignatureLockedDustAllowanceOutputDto {
+pub struct SignatureLockedOutputDto {
     #[serde(rename = "type")]
     pub kind: u8,
     pub address: AddressDto,
@@ -454,18 +445,18 @@ impl TryFrom<&Output> for OutputDto {
     type Error = String;
     fn try_from(value: &Output) -> Result<Self, Self::Error> {
         match value {
-            Output::SignatureLockedSingle(s) => Ok(OutputDto::SignatureLockedSingle(SignatureLockedSingleOutputDto {
+            Output::SignatureLockedSingle(s) => Ok(OutputDto::SignatureLockedOutputDto(SignatureLockedOutputDto {
                 kind: 0,
                 address: s.address().try_into()?,
                 amount: s.amount(),
             })),
-            Output::SignatureLockedDustAllowance(s) => Ok(OutputDto::SignatureLockedDustAllowance(
-                SignatureLockedDustAllowanceOutputDto {
+            Output::SignatureLockedDustAllowance(s) => {
+                Ok(OutputDto::SignatureLockedOutputDto(SignatureLockedOutputDto {
                     kind: 1,
                     address: s.address().try_into()?,
                     amount: s.amount(),
-                },
-            )),
+                }))
+            }
             _ => Err("output type not supported".to_string()),
         }
     }
@@ -476,16 +467,21 @@ impl TryFrom<&OutputDto> for Output {
     type Error = String;
     fn try_from(value: &OutputDto) -> Result<Self, Self::Error> {
         match value {
-            OutputDto::SignatureLockedSingle(s) => Ok(Output::SignatureLockedSingle(
-                SignatureLockedSingleOutput::new((&s.address).try_into()?, s.amount)
-                    // TODO unwrap
-                    .unwrap(),
-            )),
-            OutputDto::SignatureLockedDustAllowance(s) => Ok(Output::SignatureLockedDustAllowance(
-                SignatureLockedDustAllowanceOutput::new((&s.address).try_into()?, s.amount)
-                    // TODO unwrap
-                    .unwrap(),
-            )),
+            OutputDto::SignatureLockedOutputDto(s) => {
+                match s.kind {
+                    0 => Ok(Output::SignatureLockedSingle(
+                        SignatureLockedSingleOutput::new((&s.address).try_into()?, s.amount)
+                            // TODO unwrap
+                            .unwrap(),
+                    )),
+                    1 => Ok(Output::SignatureLockedDustAllowance(
+                        SignatureLockedDustAllowanceOutput::new((&s.address).try_into()?, s.amount)
+                            // TODO unwrap
+                            .unwrap(),
+                    )),
+                    _ => Err("Type not supported".to_string()),
+                }
+            }
             OutputDto::Treasury(t) => Ok(Output::Treasury(
                 TreasuryOutput::new(t.amount)
                     // TODO unwrap
